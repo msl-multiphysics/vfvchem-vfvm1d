@@ -1,0 +1,82 @@
+[package]
+name = "vfvchem_vfvm1d"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+faer = "0.24.0"
+faer_gmres = "0.5.0"
+thiserror = "1"
+
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
+
+[[example]]
+name = "heat_transient"
+path = "examples/heat/heat_transient.rs"
+
+[[example]]
+name = "heat_tworeg"
+path = "examples/heat/heat_tworeg.rs"
+
+[[example]]
+name = "heat_analytic"
+path = "examples/heat/heat_analytic.rs"
+
+[[example]]
+name = "heat_rod"
+path = "examples/heat/heat_rod.rs"
+
+[[example]]
+name = "mass_slab"
+path = "examples/mass/mass_slab.rs"
+
+[[example]]
+name = "mass_analytic"
+path = "examples/mass/mass_analytic.rs"
+
+[[example]]
+name = "flow_analytic"
+path = "examples/flow/flow_analytic.rs"
+
+[[example]]
+name = "flow_tworeg"
+path = "examples/flow/flow_tworeg.rs"
+
+[[example]]
+name = "flow_heated"
+path = "examples/flow/flow_heated.rs"
+
+[[example]]
+name = "heatflow_tube"
+path = "examples/heatflow/heatflow_tube.rs"
+
+[[example]]
+name = "massflow_reactor"
+path = "examples/massflow/massflow_reactor.rs"
+
+[[example]]
+name = "heatmassflow_reactor"
+path = "examples/heatmassflow/heatmassflow_reactor.rs"
+
+[[example]]
+name = "feat_prod"
+path = "examples/features/feat_prod.rs"
+
+[[example]]
+name = "feat_itf"
+path = "examples/features/feat_itf.rs"
+
+[[example]]
+name = "feat_adt"
+path = "examples/features/feat_adt.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev.package.faer]
+opt-level = 3

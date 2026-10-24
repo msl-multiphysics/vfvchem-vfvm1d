@@ -1,0 +1,393 @@
+use crate::base::prelude::*;
+use crate::operator::core::flow_helper;
+use crate::operator::core::flow_helper::FlowChain;
+use crate::operator::prelude::*;
+use crate::steady::prelude::*;
+use faer::Col;
+use faer::sparse::Triplet;
+use std::collections::HashMap;
+
+#[derive(Default)]
+pub struct SteadyHeatFlow {
+    // heat internal data
+    pub itr_hdom: Vec<usize>,             // domain
+    pub itr_temp: HashMap<usize, usize>,  // temperature
+    pub itr_vlcp: HashMap<usize, usize>,  // volumetric heat capacity
+    pub itr_cond: HashMap<usize, usize>,  // thermal conductivity
+    pub itr_hprd: HashMap<usize, usize>,  // heat production coefficient
+    pub itr_hsrc: HashMap<usize, usize>,  // heat source
+
+    // heat boundary data
+    pub temp_bnd: Vec<usize>,              // boundary with temperature BC
+    pub temp_temp: HashMap<usize, usize>,  // temperature
+    pub hflx_bnd: Vec<usize>,              // boundary with diffusive heat flux BC
+    pub hflx_hflx: HashMap<usize, usize>,  // diffusive heat flux
+    pub hout_bnd: Vec<usize>,              // boundary with heat outflow BC
+
+    // heat interface data
+    pub hcnt_itf: Vec<usize>,              // interface with continuity IC
+
+    // flow internal data
+    pub itr_fdom: Vec<usize>,            // domain
+    pub itr_vel: HashMap<usize, usize>,  // velocity
+    pub itr_den: HashMap<usize, usize>,  // density
+    pub itr_flw: HashMap<usize, usize>,  // flow data; created in initial_start
+
+    // flow boundary data
+    pub vel_bnd: Vec<usize>,             // inlet boundary with velocity BC
+    pub vel_vel: HashMap<usize, usize>,  // velocity
+    pub mfr_bnd: Vec<usize>,             // inlet boundary with mass flow rate BC
+    pub mfr_mfr: HashMap<usize, usize>,  // mass flow rate per unit area; positive into the domain
+
+    // flow interface data
+    pub fcnt_itf: Vec<usize>,            // interface with continuity IC
+
+    // flow chains; built in initial_start
+    pub flw_chain: Vec<FlowChain>,
+
+    // heat operators
+    pub oper_itr_heat: Vec<(OpSclDomDiffusion, OpSclDomProduction, OpSclDomSource)>,
+    pub oper_itr_hadv: Vec<OpSclDomAdvection>,
+    pub oper_bnd_temp: Vec<OpSclBndDirichlet>,
+    pub oper_bnd_hflx: Vec<(OpSclBndDiffusion, OpSclBndProduction, OpSclBndSource, OpSclBndNeumann)>,
+    pub oper_bnd_hadv: Vec<OpSclBndAdvection>,
+    pub oper_bnd_hout: Vec<(OpSclBndDiffusion, OpSclBndAdvection, OpSclBndProduction, OpSclBndSource)>,
+    pub oper_itf_hcnt: Vec<(OpSclItfContinuity, OpSclItfDiffusion, OpSclItfProduction, OpSclItfSource)>,
+    pub oper_itf_hadv: Vec<OpSclItfAdvection>,
+
+    // flow operators
+    pub oper_itr_flow: Vec<OpSclDomDivergence>,
+    pub oper_bnd_vel: Vec<OpSclBndDirichlet>,
+    pub oper_bnd_mfr: Vec<OpSclBndMassFlowRate>,
+    pub oper_itf_fcnt: Vec<OpSclItfDivergence>,
+}
+
+impl SteadyHeatFlow {
+    pub fn new() -> Result<SteadyHeatFlow, VFVChemError> {
+        let phys = SteadyHeatFlow::default();
+        Ok(phys)
+    }
+
+    pub fn add_heat_dom(&mut self, dom_id: usize, temp_id: usize, vlcp_id: usize, cond_id: usize, hprd_id: usize, hsrc_id: usize) -> Result<(), VFVChemError> {
+        self.itr_hdom.push(dom_id);
+        self.itr_temp.insert(dom_id, temp_id);
+        self.itr_vlcp.insert(dom_id, vlcp_id);
+        self.itr_cond.insert(dom_id, cond_id);
+        self.itr_hprd.insert(dom_id, hprd_id);
+        self.itr_hsrc.insert(dom_id, hsrc_id);
+        Ok(())
+    }
+
+    pub fn add_temp_bnd(&mut self, bnd_id: usize, temp_id: usize) -> Result<(), VFVChemError> {
+        self.temp_bnd.push(bnd_id);
+        self.temp_temp.insert(bnd_id, temp_id);
+        Ok(())
+    }
+
+    pub fn add_hflx_bnd(&mut self, bnd_id: usize, hflx_id: usize) -> Result<(), VFVChemError> {
+        self.hflx_bnd.push(bnd_id);
+        self.hflx_hflx.insert(bnd_id, hflx_id);
+        Ok(())
+    }
+
+    pub fn add_hout_bnd(&mut self, bnd_id: usize) -> Result<(), VFVChemError> {
+        self.hout_bnd.push(bnd_id);
+        Ok(())
+    }
+
+    pub fn add_hcnt_itf(&mut self, itf_id: usize) -> Result<(), VFVChemError> {
+        self.hcnt_itf.push(itf_id);
+        Ok(())
+    }
+
+    pub fn add_flow_dom(&mut self, dom_id: usize, vel_id: usize, den_id: usize) -> Result<(), VFVChemError> {
+        self.itr_fdom.push(dom_id);
+        self.itr_vel.insert(dom_id, vel_id);
+        self.itr_den.insert(dom_id, den_id);
+        Ok(())
+    }
+
+    pub fn add_vel_bnd(&mut self, bnd_id: usize, vel_id: usize) -> Result<(), VFVChemError> {
+        self.vel_bnd.push(bnd_id);
+        self.vel_vel.insert(bnd_id, vel_id);
+        Ok(())
+    }
+
+    pub fn add_mfr_bnd(&mut self, bnd_id: usize, mfr_id: usize) -> Result<(), VFVChemError> {
+        self.mfr_bnd.push(bnd_id);
+        self.mfr_mfr.insert(bnd_id, mfr_id);
+        Ok(())
+    }
+
+    pub fn add_fcnt_itf(&mut self, itf_id: usize) -> Result<(), VFVChemError> {
+        self.fcnt_itf.push(itf_id);
+        Ok(())
+    }
+
+}
+
+impl SteadyBase for SteadyHeatFlow {
+    fn initial_start(&mut self, vars: &mut Variables) -> Result<usize, VFVChemError> {
+        // iterate over unknown scalars
+        let mut xid = 0;  // index in solution vector
+        for (&dom_id, &vel_id) in &self.itr_vel {
+            vars.scldom[vel_id].scldom_type = SclDomType::Unknown { start: xid };
+            xid += vars.dom[dom_id].num_tot();
+        }
+        for (&dom_id, &temp_id) in &self.itr_temp {
+            vars.scldom[temp_id].scldom_type = SclDomType::Unknown { start: xid };
+            xid += vars.dom[dom_id].num_tot();
+        }
+
+
+        // create flow data
+        // replace in place on a re-solve to avoid orphaned flow data
+        for &dom_id in &self.itr_fdom {
+            let vel_id = self.itr_vel[&dom_id];
+            let den_id = self.itr_den[&dom_id];
+            match self.itr_flw.get(&dom_id) {
+                Some(&flw_id) => { vars.sclflw[flw_id] = ScalarFlow::new(flw_id, &vars.dom[dom_id], vel_id, den_id)?; }
+                None => { self.itr_flw.insert(dom_id, vars.add_sclflw(dom_id, vel_id, den_id)?); }
+            }
+        }
+
+        // create flow chains from the inlets
+        let flow_dom: Vec<(usize, usize, usize, usize)> = self.itr_fdom.iter().map(|&dom_id| (dom_id, self.itr_vel[&dom_id], self.itr_den[&dom_id], self.itr_flw[&dom_id])).collect();
+        let inlet_bnd: Vec<usize> = self.vel_bnd.iter().chain(self.mfr_bnd.iter()).copied().collect();
+        self.flw_chain = flow_helper::build_flow_chains(vars, &flow_dom, &inlet_bnd, &self.fcnt_itf)?;
+
+        // last xid is the matrix size
+        Ok(xid)
+    }
+
+    fn initial_operator(&mut self, vars: &Variables) -> Result<(), VFVChemError> {
+        // purge operators from a previous solve
+        self.oper_itr_heat.clear();
+        self.oper_itr_hadv.clear();
+        self.oper_bnd_temp.clear();
+        self.oper_bnd_hflx.clear();
+        self.oper_bnd_hadv.clear();
+        self.oper_bnd_hout.clear();
+        self.oper_itf_hcnt.clear();
+        self.oper_itf_hadv.clear();
+        self.oper_itr_flow.clear();
+        self.oper_bnd_vel.clear();
+        self.oper_itf_fcnt.clear();
+
+        // heat internal
+        for &dom_id in &self.itr_hdom {
+            let temp_id = self.itr_temp[&dom_id];
+            let vlcp_id = self.itr_vlcp[&dom_id];
+            let cond_id = self.itr_cond[&dom_id];
+            let hprd_id = self.itr_hprd[&dom_id];
+            let hsrc_id = self.itr_hsrc[&dom_id];
+            let oper_diff = OpSclDomDiffusion::new(vars, dom_id, temp_id, cond_id, temp_id)?;
+            let oper_prd = OpSclDomProduction::new(vars, dom_id, temp_id, hprd_id)?;
+            let oper_src = OpSclDomSource::new(vars, dom_id, temp_id, hsrc_id)?;
+            self.oper_itr_heat.push((oper_diff, oper_prd, oper_src));
+
+            // advection only on domains with flow
+            if let Some(&flw_id) = self.itr_flw.get(&dom_id) {
+                let den_id = self.itr_den[&dom_id];
+                let oper_adv = OpSclDomAdvection::new(vars, dom_id, temp_id, vlcp_id, cond_id, den_id, flw_id)?;
+                self.oper_itr_hadv.push(oper_adv);
+            }
+        }
+
+        // heat boundary
+        for &bnd_id in &self.temp_bnd {
+            let dom_id = vars.bnd[bnd_id].dom_id;
+            let dom_temp_id = self.itr_temp[&dom_id];
+            let bnd_temp_id = self.temp_temp[&bnd_id];
+            let oper_dir = OpSclBndDirichlet::new(vars, bnd_id, dom_temp_id, bnd_temp_id)?;
+            self.oper_bnd_temp.push(oper_dir);
+        }
+        for &bnd_id in &self.hflx_bnd {
+            let dom_id = vars.bnd[bnd_id].dom_id;
+            let dom_temp_id = self.itr_temp[&dom_id];
+            let dom_cond_id = self.itr_cond[&dom_id];
+            let dom_hprd_id = self.itr_hprd[&dom_id];
+            let dom_hsrc_id = self.itr_hsrc[&dom_id];
+            let bnd_hflx_id = self.hflx_hflx[&bnd_id];
+            let oper_diff = OpSclBndDiffusion::new(vars, bnd_id, dom_temp_id, dom_cond_id, dom_temp_id)?;
+            let oper_prd = OpSclBndProduction::new(vars, bnd_id, dom_temp_id, dom_hprd_id)?;
+            let oper_src = OpSclBndSource::new(vars, bnd_id, dom_temp_id, dom_hsrc_id)?;
+            let oper_neu = OpSclBndNeumann::new(vars, bnd_id, dom_temp_id, bnd_hflx_id)?;
+            self.oper_bnd_hflx.push((oper_diff, oper_prd, oper_src, oper_neu));
+
+            // advection only on domains with flow; the Neumann value is the diffusive flux
+            if let Some(&dom_flw_id) = self.itr_flw.get(&dom_id) {
+                let dom_vlcp_id = self.itr_vlcp[&dom_id];
+                let dom_vel_id = self.itr_vel[&dom_id];
+                let dom_den_id = self.itr_den[&dom_id];
+                let oper_adv = OpSclBndAdvection::new(vars, bnd_id, dom_temp_id, dom_vlcp_id, dom_cond_id, dom_vel_id, dom_den_id, dom_flw_id)?;
+                self.oper_bnd_hadv.push(oper_adv);
+            }
+        }
+        for &bnd_id in &self.hout_bnd {
+            // zero diffusive flux; heat leaves by advection only
+            let dom_id = vars.bnd[bnd_id].dom_id;
+            let dom_temp_id = self.itr_temp[&dom_id];
+            let dom_vlcp_id = self.itr_vlcp[&dom_id];
+            let dom_cond_id = self.itr_cond[&dom_id];
+            let dom_hprd_id = self.itr_hprd[&dom_id];
+            let dom_hsrc_id = self.itr_hsrc[&dom_id];
+            let dom_vel_id = self.itr_vel[&dom_id];
+            let dom_den_id = self.itr_den[&dom_id];
+            let dom_flw_id = self.itr_flw[&dom_id];
+            let oper_diff = OpSclBndDiffusion::new(vars, bnd_id, dom_temp_id, dom_cond_id, dom_temp_id)?;
+            let oper_adv = OpSclBndAdvection::new(vars, bnd_id, dom_temp_id, dom_vlcp_id, dom_cond_id, dom_vel_id, dom_den_id, dom_flw_id)?;
+            let oper_prd = OpSclBndProduction::new(vars, bnd_id, dom_temp_id, dom_hprd_id)?;
+            let oper_src = OpSclBndSource::new(vars, bnd_id, dom_temp_id, dom_hsrc_id)?;
+            self.oper_bnd_hout.push((oper_diff, oper_adv, oper_prd, oper_src));
+        }
+
+        // heat interface
+        for &itf_id in &self.hcnt_itf {
+            let dom_a_id = vars.itf[itf_id].dom_a_id;
+            let dom_b_id = vars.itf[itf_id].dom_b_id;
+            let dom_temp_a_id = self.itr_temp[&dom_a_id];
+            let dom_temp_b_id = self.itr_temp[&dom_b_id];
+            let dom_cond_a_id = self.itr_cond[&dom_a_id];
+            let dom_cond_b_id = self.itr_cond[&dom_b_id];
+            let dom_hprd_a_id = self.itr_hprd[&dom_a_id];
+            let dom_hprd_b_id = self.itr_hprd[&dom_b_id];
+            let dom_hsrc_a_id = self.itr_hsrc[&dom_a_id];
+            let dom_hsrc_b_id = self.itr_hsrc[&dom_b_id];
+            let oper_cont = OpSclItfContinuity::new(vars, itf_id, dom_temp_a_id, dom_temp_b_id)?;
+            let oper_diff = OpSclItfDiffusion::new(vars, itf_id, dom_temp_a_id, dom_cond_a_id, dom_temp_a_id, dom_temp_b_id, dom_cond_b_id, dom_temp_b_id)?;
+            let oper_prd = OpSclItfProduction::new(vars, itf_id, dom_temp_a_id, dom_hprd_a_id, dom_temp_b_id, dom_hprd_b_id)?;
+            let oper_src = OpSclItfSource::new(vars, itf_id, dom_temp_a_id, dom_hsrc_a_id, dom_temp_b_id, dom_hsrc_b_id)?;
+            self.oper_itf_hcnt.push((oper_cont, oper_diff, oper_prd, oper_src));
+
+            // advection on each side with flow
+            for dom_id in [dom_a_id, dom_b_id] {
+                if let Some(&flw_id) = self.itr_flw.get(&dom_id) {
+                    let vlcp_id = self.itr_vlcp[&dom_id];
+                    let cond_id = self.itr_cond[&dom_id];
+                    let vel_id = self.itr_vel[&dom_id];
+                    let den_id = self.itr_den[&dom_id];
+                    let oper_adv = OpSclItfAdvection::new(vars, itf_id, dom_temp_a_id, dom_temp_b_id, vlcp_id, cond_id, vel_id, den_id, flw_id)?;
+                    self.oper_itf_hadv.push(oper_adv);
+                }
+            }
+        }
+
+        // flow internal and interface
+        // continuity of each segment goes into the row of its downstream vertex, so the flow direction comes from the flow chains
+        for chain in &self.flw_chain {
+            for link in &chain.links {
+                let oper_div = OpSclDomDivergence::new(vars, link.dom_id, link.vel_id, link.den_id, link.dir)?;
+                self.oper_itr_flow.push(oper_div);
+            }
+            for &(itf_id, up_is_a) in &chain.itfs {
+                let dom_a_id = vars.itf[itf_id].dom_a_id;
+                let dom_b_id = vars.itf[itf_id].dom_b_id;
+                let (vel_a_id, vel_b_id) = (self.itr_vel[&dom_a_id], self.itr_vel[&dom_b_id]);
+                let (den_a_id, den_b_id) = (self.itr_den[&dom_a_id], self.itr_den[&dom_b_id]);
+                let oper_div = OpSclItfDivergence::new(vars, itf_id, vel_a_id, den_a_id, vel_b_id, den_b_id, up_is_a)?;
+                self.oper_itf_fcnt.push(oper_div);
+            }
+        }
+
+        // flow boundary (inlet)
+        for &bnd_id in &self.vel_bnd {
+            let dom_id = vars.bnd[bnd_id].dom_id;
+            let dom_vel_id = self.itr_vel[&dom_id];
+            let bnd_vel_id = self.vel_vel[&bnd_id];
+            let oper_dir = OpSclBndDirichlet::new(vars, bnd_id, dom_vel_id, bnd_vel_id)?;
+            self.oper_bnd_vel.push(oper_dir);
+        }
+        for &bnd_id in &self.mfr_bnd {
+            let dom_id = vars.bnd[bnd_id].dom_id;
+            let dom_vel_id = self.itr_vel[&dom_id];
+            let dom_den_id = self.itr_den[&dom_id];
+            let bnd_mfr_id = self.mfr_mfr[&bnd_id];
+            let oper_mfr = OpSclBndMassFlowRate::new(vars, bnd_id, dom_vel_id, dom_den_id, bnd_mfr_id)?;
+            self.oper_bnd_mfr.push(oper_mfr);
+        }
+
+        Ok(())
+    }
+
+    fn assemble_matrix(&self, vars: &Variables, a_triplet: &mut Vec<Triplet<usize, usize, f64>>, b_vec: &mut Col<f64>) -> Result<(), VFVChemError> {
+        // flow internal
+        for oper_div in &self.oper_itr_flow {
+            oper_div.apply(vars, a_triplet, b_vec)?;
+        }
+
+        // flow boundary
+        for oper_dir in &self.oper_bnd_vel {
+            oper_dir.apply(vars, a_triplet, b_vec)?;
+        }
+        for oper_mfr in &self.oper_bnd_mfr {
+            oper_mfr.apply(vars, a_triplet, b_vec)?;
+        }
+
+        // flow interface
+        for oper_div in &self.oper_itf_fcnt {
+            oper_div.apply(vars, a_triplet, b_vec)?;
+        }
+
+        // heat internal
+        for (oper_diff, oper_prd, oper_src) in &self.oper_itr_heat {
+            oper_diff.apply(vars, a_triplet, b_vec)?;
+            oper_prd.apply(vars, a_triplet, b_vec)?;
+            oper_src.apply(vars, a_triplet, b_vec)?;
+        }
+        for oper_adv in &self.oper_itr_hadv {
+            oper_adv.apply(vars, a_triplet, b_vec)?;
+        }
+
+        // heat boundary
+        for oper_dir in &self.oper_bnd_temp {
+            oper_dir.apply(vars, a_triplet, b_vec)?;
+        }
+        for (oper_diff, oper_prd, oper_src, oper_neu) in &self.oper_bnd_hflx {
+            oper_diff.apply(vars, a_triplet, b_vec)?;
+            oper_prd.apply(vars, a_triplet, b_vec)?;
+            oper_src.apply(vars, a_triplet, b_vec)?;
+            oper_neu.apply(vars, a_triplet, b_vec)?;
+        }
+        for oper_adv in &self.oper_bnd_hadv {
+            oper_adv.apply(vars, a_triplet, b_vec)?;
+        }
+        for (oper_diff, oper_adv, oper_prd, oper_src) in &self.oper_bnd_hout {
+            oper_diff.apply(vars, a_triplet, b_vec)?;
+            oper_adv.apply(vars, a_triplet, b_vec)?;
+            oper_prd.apply(vars, a_triplet, b_vec)?;
+            oper_src.apply(vars, a_triplet, b_vec)?;
+        }
+
+        // heat interface
+        for (oper_cont, oper_diff, oper_prd, oper_src) in &self.oper_itf_hcnt {
+            oper_cont.apply(vars, a_triplet, b_vec)?;
+            oper_diff.apply(vars, a_triplet, b_vec)?;
+            oper_prd.apply(vars, a_triplet, b_vec)?;
+            oper_src.apply(vars, a_triplet, b_vec)?;
+        }
+        for oper_adv in &self.oper_itf_hadv {
+            oper_adv.apply(vars, a_triplet, b_vec)?;
+        }
+
+        Ok(())
+    }
+
+    fn initial_dirichlet(&self, vars: &mut Variables) {
+        // boundary
+        for oper_dir in &self.oper_bnd_temp {
+            oper_dir.apply_initial(vars);
+        }
+        for oper_dir in &self.oper_bnd_vel {
+            oper_dir.apply_initial(vars);
+        }
+        for oper_mfr in &self.oper_bnd_mfr {
+            oper_mfr.apply_initial(vars);
+        }
+    }
+
+    fn update_flow(&self, vars: &mut Variables) {
+        // face mass flux marched from the inlets
+        flow_helper::update_flow(vars, &self.flw_chain, None);
+    }
+}
